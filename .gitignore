@@ -1,0 +1,19 @@
+# 开发辅助脚本(本地测试用,不发布)
+_upload_to_halo.py
+_create_test_vm.py
+_diag_vm.py
+_find_vm_ip.py
+_verify_ssh.py
+
+# Python
+__pycache__/
+*.pyc
+
+# 日志
+*.log
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.bak
