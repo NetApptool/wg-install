@@ -17,7 +17,7 @@
 #   dkms 编译 wireguard 模块,可能因缺 kernel-headers 失败,脚本会友好告知。
 # ============================================================
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 
 set -euo pipefail
 
@@ -164,13 +164,51 @@ case "$PKG_MGR" in
     apk)    PKGS="wireguard-tools curl iproute2 iptables" ;;
 esac
 
+# RHEL 系健壮安装:
+#   1) 只装"当前缺失"的包 —— 不去碰已装的 curl/iproute/iptables,避免 dnf 把
+#      它们往上游升级,从而触发 openssl 等核心库升级链(在 RHEL/CentOS-Stream
+#      源版本错位的机器上会撞 openssl-fips-provider 的 fips.so 文件冲突)。
+#   2) wireguard-tools 仍装不上时(其硬依赖 systemd-resolved 在错位源上不可
+#      满足),回退到"单独下 rpm + rpm -Uvh --nodeps"最小安装 —— wg 运行只需
+#      内核模块(≥5.6 内置)+ wg/wg-quick 两个用户态工具,systemd-resolved 非
+#      必需(本脚本 DNS 已自管)。
+rpm_install_robust() {
+    local mgr="$1"; shift
+    local want="$*" missing="" p
+    for p in $want; do
+        rpm -q "$p" >/dev/null 2>&1 || missing="$missing $p"
+    done
+    # wg 已在则不再碰 wireguard-tools
+    command -v wg >/dev/null 2>&1 && missing=$(echo " $missing " | sed 's/ wireguard-tools / /g')
+    missing=$(echo $missing | xargs)   # trim
+    [ -z "$missing" ] && { log "依赖已满足,无需安装"; return 0; }
+
+    # 先常规安装缺失包
+    $mgr install -y -q $missing >> "$LOG_FILE" 2>&1 && return 0
+
+    # 失败 → 最小化安装 wireguard-tools(绕开 openssl/systemd 升级链)
+    log "常规 $mgr 安装失败,回退最小化安装 wireguard-tools"
+    command -v wg >/dev/null 2>&1 && return 0
+    local dldir; dldir=$(mktemp -d)
+    $mgr install -y -q 'dnf-command(download)' >> "$LOG_FILE" 2>&1 || true
+    if   $mgr download --destdir="$dldir"     wireguard-tools >> "$LOG_FILE" 2>&1 \
+      || $mgr download --downloaddir="$dldir" wireguard-tools >> "$LOG_FILE" 2>&1 \
+      || ( cd "$dldir" && yumdownloader wireguard-tools >> "$LOG_FILE" 2>&1 ); then
+        if ls "$dldir"/wireguard-tools-*.rpm >/dev/null 2>&1 \
+           && rpm -Uvh --nodeps "$dldir"/wireguard-tools-*.rpm >> "$LOG_FILE" 2>&1; then
+            rm -rf "$dldir"; log "最小化安装 wireguard-tools 成功"; return 0
+        fi
+    fi
+    rm -rf "$dldir"; return 1
+}
+
 install_pkgs() {
     case "$PKG_MGR" in
         apt)
             DEBIAN_FRONTEND=noninteractive apt-get update -qq >> "$LOG_FILE" 2>&1
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS >> "$LOG_FILE" 2>&1 ;;
-        dnf)    dnf install -y -q $PKGS >> "$LOG_FILE" 2>&1 ;;
-        yum)    yum install -y -q $PKGS >> "$LOG_FILE" 2>&1 ;;
+        dnf)    rpm_install_robust dnf $PKGS ;;
+        yum)    rpm_install_robust yum $PKGS ;;
         pacman) pacman -Sy --noconfirm --needed $PKGS >> "$LOG_FILE" 2>&1 ;;
         zypper) zypper -n install $PKGS >> "$LOG_FILE" 2>&1 ;;
         apk)    apk add --no-progress $PKGS >> "$LOG_FILE" 2>&1 ;;
